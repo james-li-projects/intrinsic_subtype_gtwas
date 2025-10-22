@@ -1,0 +1,430 @@
+# Cross-ancestry GWAS and TWAS
+
+# Normalizing vanderbilt RNA-seq expression counts using edgeR
+```{r}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/EDGER_COMBINE_NORM_EXPRESSION.R
+```
+
+
+# Moving processed GTEx genotyping data
+```{bash}
+# GTEx - convert vcf to bfile
+export TMPDIR=/scratch/jll1/tmp
+cd /scratch/jll1/imQTL/genetic_data
+cp /gpfs/data/pierce-lab/GTEx/GTEx_data/Genotypes/GTEx_Analysis_2017-06-05_v8_WholeGenomeSeq_838Indiv_Analysis_Freeze.SHAPEIT2_phased.MAF01.vcf.gz /scratch/jll1/imQTL/genetic_data
+
+# annotate SNPs
+input_vcf_file=/scratch/jll1/imQTL/genetic_data/GTEx_Analysis_2017-06-05_v8_WholeGenomeSeq_838Indiv_Analysis_Freeze.SHAPEIT2_phased.MAF01.vcf.gz
+bcftools annotate ${input_vcf_file} --set-id '%CHROM:%POS:%REF:%ALT' | bcftools sort -Oz -o processed_gtex.vcf.gz
+bcftools index -t processed_gtex.vcf.gz
+
+module load plink/2.0
+plink2 --vcf processed_gtex.vcf.gz --chr 1-22 --make-bed --out /gpfs/data/huo-lab/BCAC/james.li/GTEx/genetic_data/processed_gtex
+
+# make allele frequency matrix
+cd /gpfs/data/huo-lab/BCAC/james.li/GTEx/genetic_data
+plink --bfile processed_gtex --freq --out gtex_AF
+
+```
+
+# Identifying GTEx samples for each ancestry group
+```{r}
+library(data.table)
+library(dplyr)
+df<-fread("/gpfs/data/huo-lab/BCAC/james.li/GTEx/Metadata/GTEx_Analysis_2017-06-05_v8_Annotations_SubjectPhenotypesDS.txt")
+table(df$RACE)
+table(df$SEX)
+
+EUR <- df %>% filter(RACE==3,SEX==2) %>% select(SUBJID)
+AFR <- df %>% filter(RACE==2,SEX==2) %>% select(SUBJID)
+
+write.table(EUR,file="/gpfs/data/huo-lab/BCAC/james.li/GTEx/females_by_ancestry/EUR.list",quote=F,row.names=F,col.names=F)
+write.table(AFR,file="/gpfs/data/huo-lab/BCAC/james.li/GTEx/females_by_ancestry/AFR.list",quote=F,row.names=F,col.names=F)
+
+# writing out age and BMI covariates
+cov <- df %>% select(SUBJID, AGE, BMI)
+write.table(cov, file="/gpfs/data/huo-lab/BCAC/james.li/GTEx/covariates_age_bmi/cov.tsv",quote=F,row.names=F,col.names=T,sep="\t")
+```
+
+# Location of expression and splicing phenotype matrices
+```{bash}
+/gpfs/data/huo-lab/BCAC/james.li/GTEx/GTEx_Analysis_v8_sQTL_phenotype_matrices/Breast_Mammary_Tissue.v8.leafcutter_phenotypes.bed.gz
+
+/gpfs/data/huo-lab/BCAC/james.li/GTEx/GTEx_Analysis_v8_eQTL_expression_matrices/Breast_Mammary_Tissue.v8.normalized_expression.bed.gz
+```
+
+# Trying to align leafcutter and gtex intron matrices
+```{bash}
+cd /gpfs/data/huo-lab/Vanderbilt/Julian/02_merge_in_gtex_and_prep_data/input/leafcutter_output
+
+# obtaining all IDs from vanderbilt data
+cat Vander417_perind.counts.gz.qqnorm_1 | cut -f4 | grep -v "ID" > /scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_vandervilt.txt 
+for i in `seq 2 22`
+do
+  echo Vander417_perind.counts.gz.qqnorm_${i}
+  cat Vander417_perind.counts.gz.qqnorm_${i} | cut -f4 | grep -v "ID" >> /scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_vandervilt.txt
+done
+
+# obtaining all IDs from gtex data
+zcat /gpfs/data/huo-lab/BCAC/james.li/GTEx/GTEx_Analysis_v8_sQTL_phenotype_matrices/Breast_Mammary_Tissue.v8.leafcutter_phenotypes.bed.gz | cut -f4 | grep -v "ID" > /scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_gtex.txt
+
+# aligning clusters in R
+library(data.table)
+library(dplyr)
+library(tidyr)
+
+
+vanderbilt <- unique(fread("/scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_vandervilt.txt",header=F) %>% separate(V1, into=c("chr","pos1","pos2","orig_cluster_id","extrafield"),sep="\\:",remove=T) %>% select(orig_cluster_id))
+
+gtex <- unique(fread("/scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_gtex.txt",header=F) %>% separate(V1, into=c("chr","pos1","pos2","orig_cluster_id","extrafield"),sep="\\:",remove=T) %>% select(orig_cluster_id))
+nrow(vanderbilt)
+nrow(gtex)
+> nrow(gtex)
+[1] 41085
+> nrow(vanderbilt)
+[1] 41082
+#########################################
+vanderbilt <- fread("/scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_vandervilt.txt",header=F) %>% separate(V1, into=c("chr","pos1","pos2","orig_cluster_id","extrafield"),sep="\\:",remove=T) %>% select(-extrafield) %>% mutate(chr=paste0("chr",chr)) %>% mutate(intron=paste(chr,pos1,pos2,sep=":")) %>% select(intron,orig_cluster_id) %>% group_by(orig_cluster_id) %>% summarise_each(funs(toString))
+
+gtex <- fread("/scratch/jll1/XANCESTRY_GWAS_TWAS/splice_id_gtex.txt",header=F) %>% separate(V1, into=c("chr","pos1","pos2","orig_cluster_id","extrafield"),sep="\\:",remove=T) %>% select(-extrafield) %>% mutate(intron=paste(chr,pos1,pos2,sep=":")) %>% select(intron,orig_cluster_id) %>% group_by(orig_cluster_id) %>% summarise_each(funs(toString))
+
+length(intersect(gtex$intron,vanderbilt$intron))
+3495
+```
+
+# Processing AABCG data
+```{r}
+# copying over the genetic data pgen file
+# cp /gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/output/MASTER_FILES/GWAS/GWAS.* /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/pfile/
+
+# generating PCs
+sbatch /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/GWAS_plink2_compute_pca.sh
+```
+
+# Computing allele frequencies in AFR for variants
+```{bash}
+# computing allele frequencies 
+for subtype in HRPOS_HER2POS HRPOS_HER2NEG HRNEG_HER2POS HRNEG_HER2NEG
+do
+  plink2 -pfile /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/pfile/GWAS --keep /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/sample_list/${subtype}_sample.list --freq --out /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/afreq/${subtype}
+done
+```
+
+# Performing intrinsic subtype GWAS in AFR using TOP 
+```{bash}
+# making variant lists for each partition
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/CREATE_GWAS_PARTITION_VARIANT_LISTS.R
+
+# running TOP to conduct an intrinsic subtype GWAS for each partition file
+sbatch /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/RUN_TOP_GWAS.sh
+```
+
+# Performing intrinsic subtype GWAS in AFR using PLINKv2.0
+```{bash}
+# preparing covariates
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PREPARE_PLINK2_COVARIATES.R
+
+# running GWAS
+for subtype in HRNEG_HER2NEG HRNEG_HER2POS HRPOS_HER2NEG HRPOS_HER2POS
+do
+  for dataset in `ls /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/pheno_cov/HRPOS_HER2NEG.* | sed 's|/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/input/pheno_cov/HRPOS_HER2NEG.||; s|.pheno_cov$||' | grep -v "pheno_cov"`
+  do
+    echo $subtype $dataset
+    sbatch --export=ARGS1=${subtype},ARGS2=${dataset} /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/PLINK2_GWAS_GLM.sh
+  done
+done
+```
+
+# Combining TOP summary statistics for AFR across all variants
+```{bash}
+# set working directory to the output partition sumstats folder
+cd /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/partition/output_sumstats
+
+# Iterate over each unique prefix from the files
+for dataset in $(ls *_00001.sumstats | cut -f1 -d"_"); do
+# Define output file path
+output_file="/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/top_combined_sumstats/${dataset}.sumstats"
+
+# Get the first file and store its first line (included wild card because BCAC_OncoArray is separated out by the _ sign in the for loop)
+first_file=`ls ${dataset}*_partition_00001.sumstats | head -1`
+head -n 1 "$first_file" > "$output_file"
+
+# Concatenate all files for the same dataset, skipping the first line from all but the first file
+tail -n +2 -q ${dataset}_*.sumstats >> "$output_file"
+
+# Print confirmation
+echo "Merged files for ${dataset} into $output_file"
+done
+```
+
+# Making alleles consistent to the variant IDs for all subtypes and datasets for AFR sumstats
+```{bash}
+# making effect alleles consistent
+path1="/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/plink2_gwas"
+path2="/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/top_combined_sumstats"
+
+for path in $path1 $path2
+do
+  cd $path || { echo "Failed to change directory to $path"; exit 1; }
+
+  if [ "$path" == "$path1" ]; then
+    suffix="*.Status.glm.logistic.hybrid"
+  elif [ "$path" == "$path2" ]; then
+    suffix="*.sumstats"
+  fi
+
+  for sumstats in $suffix
+  do
+    # Check if files exist before looping
+    [ -e "$sumstats" ] || continue
+    echo $path $sumstats
+    # sbatch the jobs 
+    sbatch --export=ARGS1=${path},ARGS2=${sumstats} /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/MAKE_CONSISTENT_ALLELE.sh
+  done
+done
+
+# filtering variants based on MAF to remove potential false positives
+for dataset in TOP plink2
+do
+  cd /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/consistent_allele/unfiltered_sumstats_${dataset}
+  for sumstats in *
+  do
+    sbatch --export=ARGS1=${dataset},ARGS2=${sumstats}  /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/FILTER_VARIANTS_MAF.sh
+  done
+done
+```
+
+# Collating AFR sumstats between TOP and plink2
+```{bash}
+cd /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/consistent_allele/sumstats_plink2
+for file in *
+do
+  sbatch --export=ARGS1=${file} /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/COLLATING_TOP_PLINK2_SUMSTATS.sh
+done
+```
+
+# Performing AFR meta-analysis using METAL
+```{bash}
+module load gcc
+module load metal
+for approach in COLLATED TOP plink2
+do
+  sh /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/RUN_AFR_META_ANALYSIS.sh ${approach}
+done
+```
+
+# Procesing EUR meta-analysis sumstats
+```{bash}
+# converting from original format to parsable format
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PROCESS_EUR_META_SUMSTATS.R
+```
+
+# Processing AFR meta-analysis sumstats to be in identical format
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PROCESS_AFR_META_SUMSTATS.R
+```
+
+# Performing XAncestry Meta-analysis
+```{bash}
+# copying each ancestry's parsed meta-analysis results into an input directory
+for ancestry in eur afr
+do
+  # setting input and output paths
+  input_dir="/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/processed_${ancestry}_meta_sumstats"
+  output_dir="/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/XANCESTRY_META/input"
+  # set working directory 
+  cd ${input_dir}
+  echo ${input_dir}
+  for filename in *
+  do
+    echo Copying $filename
+    # Construct full paths
+    input_file="$input_dir/$filename"
+    output_file="$output_dir/${filename%.tsv}.${ancestry}.sumstats"
+    # Copy and rename the file
+    cp "$input_file" "$output_file"
+  done
+done
+cd /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/XANCESTRY_META/input
+
+# run XAncestry meta-analysis
+module load gcc
+module load metal
+sh /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/sbatch/RUN_XANCESTRY_META_ANALYSIS.sh
+
+# processing results
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PROCESS_XANCESTRY_META_SUMSTATS.R
+```
+
+# Building EUR reference panel: parsing 1kg genomes
+```{bash}
+module load gcc
+module load bcftools
+
+# identify only EUR individuals in 1kg
+cd /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/data/1kg
+grep "EUR" all_hg38.psam | cut -f1 > EUR.samplist
+# make a filtered pfile with only those individuals
+plink2 -pfile all_hg38 --keep EUR.samplist --allow-extra-chr --output-chr MT --make-pgen --out all_hg38_chrprefix
+# limit this genetic data to only autosomes
+plink2 -pfile all_hg38_chrprefix --chr 1-22 --allow-extra-chr  --make-pgen --out all_hg38_chrprefix_autosomes
+# export this pfile as a vcf
+plink2 -pfile all_hg38_chrprefix_autosomes --keep EUR.samplist --allow-extra-chr --export vcf bgz --out raw_EUR_1kg
+
+# renaming chromosomes
+rename_chr_file=/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/data/xancestry_ld_ref/chr_dict/chr_name_conv.txt
+input_vcf_file=raw_EUR_1kg.vcf.gz
+bcftools annotate --rename-chrs ${rename_chr_file} ${input_vcf_file} -Oz -o chr_prefix_EUR_1kg.vcf.gz
+# indexing this vcf 
+bcftools index -t chr_prefix_EUR_1kg.vcf.gz
+
+# demultiplex multiallelics and normalize variants
+output_path=/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/data/1kg
+input_path=/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/data/1kg
+fasta_file=/gpfs/data/huo-lab/BCAC/james.li/AABCG_PROCESSING/data/hg38/hg38.fa
+bcftools norm -m-both ${input_path}/chr_prefix_EUR_1kg.vcf.gz | bcftools norm -f ${fasta_file} -cs | bcftools annotate --set-id '%CHROM:%POS:%REF:%ALT' -Oz -o ${output_path}/chr_prefix_EUR_1kg.multi.norm.vcf.gz
+
+# convert vcf back to bed file  
+plink2 --vcf ${output_path}/chr_prefix_EUR_1kg.multi.norm.vcf.gz --make-bed --out chr_prefix_EUR_1kg.multi.norm
+
+# rename variants in this panel that are in the all EUR and AFR sumstats and output final reference bfile
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/FINALIZE_EUR_LD_REFERENCE_PANEL.R
+```
+
+# Building AFR reference panel: parsing AABCG data for a subsample of controls
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/GENERATE_AFR_LD_REFERENCE_PANEL.R
+```
+
+# Creating rsID to chr:pos:ref:alt conversion dictionaries
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/CREATE_RSID_CONVERSION_DICTIONARY.R
+```
+
+# Identifying lead variants from GWAS meta-analyses
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/IDENTIFY_LEAD_VARIANTS.R
+```
+
+# Preparing input to plot phenogram of lead variants
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PREPARE_PHENOGRAM_INPUT_GWAS.R
+```
+
+# Performing conditional analysis with GCTA-COJO
+```{bash}
+module load gcc
+module load gcta/1.94.1
+module load plink/2.0
+
+# Preparing allele frequency for COJO analysis (N or variant call rates is not functional in this script)
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PREPARE_COJO_EAF_N.R
+
+# Running COJO for xancestry meta-analysis lead variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/GCTA_COJO_GWAS_xancestry.R
+
+# Running COJO for afr meta-analysis lead variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/GCTA_COJO_GWAS_afr.R
+```
+
+# Examining heterogeneity of lead variants across subtypes
+```{bash}
+# performing heterogeneity tests
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPUTING_VARIANT_HETEROGENEITY_afr.R
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPUTING_VARIANT_HETEROGENEITY_xancestry.R
+
+# assembling subtype heterogeneity table of lead variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/ASSEMBLING_HETEROGENEITY_TABLE_afr.R
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/ASSEMBLING_HETEROGENEITY_TABLE_xancestry.R
+```
+
+# Examining heterogeneity of lead variants across ancestries
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/EXTRACT_CROSS_ANCESTRY_HETEROGENEITY.R
+```
+
+# Computing allele frequencies of lead variants by dataset
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPUTE_AF_BY_STUDY_LEAD_VARIANTS.R
+```
+
+# Computing TNBC risk allele frequencies of lead variants by continent
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPUTE_AF_BY_CONTINENT.R
+```
+
+# Parsing GWAS lead variants for final tables
+```{bash}
+# primary table
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/FINALIZE_NOVEL_LEAD_VARIANT_OUTPUT.R
+
+# parsing platform heterogeneity results
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PARSING_AABCG_DATASET_HETEROGENEITY_TABLE.R
+
+# supplementary table of all lead variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/FINALIZE_ALL_ANCESTRY_LEAD_VARIANT_OUTPUT.R
+
+# obtaining variant gene annotations
+lead_variant_gene_context <- fread("/gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/output/GWAS/lead_variant_output/snp-nexus/ensembl_variants.txt")
+
+lead_variant_gene_context %>% rename(rsid=`Variation ID`,context=`Predicted Function`) %>% mutate(annotation=paste0(gsub("non-coding ","",gsub("3","",gsub("5","",context))))) %>% select(rsid,Symbol,annotation) %>% unique() %>% distinct(rsid, .keep_all = TRUE)
+
+head(lead_variant_gene_context)
+
+# identify completely novel breast cancer loci
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/IDENTIFY_COMPLETELY_NOVEL_LEAD_VARIANTS.R
+```
+
+# Preparing final GWAS sumstats that remove problematic variants and generating QQ-plots with theses final sumstats
+```{bash}
+# finalizing sumstats processing
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/FINAL_PREPARATION_GWAS_SUMSTATS.R
+
+# generating final QQ-plots and calculating lambda/lambda_1000
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/GENERATE_QQPLOT.R
+
+# counting lead variants
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COUNT_LEAD_VARIANTS.R
+```
+
+# Preparing GWAS output for TWAS input 
+```{bash}
+# preparing GWAS sumstats for COJO TWAS
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PREPARE_COJO_TWAS_SUMSTATS.R
+
+# preparing lead variant file for COJO TWAS 
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PREPARE_COJO_TWAS_LEAD_VARIANTS.R
+
+# computing mean effective sample sizes for each subtype in each ancestry based on variant standard errors
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPUTE_MEAN_EFFECTIVE_SAMPLE_SIZES.R
+```
+
+# Compiling previous TWAS genes list
+```{bash}
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPILING_PREVIOUS_TWAS_GENE_LIST.R
+```
+
+# Running TWAS components
+```{bash}
+# parsing primary TWAS results and performing meta-analysis
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/META_ANALYZE_TWAS.R
+
+# examine subtype specificity
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/EXAMINING_TWAS_SUBTYPE_SPECIFICITY.R
+
+# parsing COJO TWAS results and performing meta-analysis
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PARSE_COJO_TWAS_RESULTS.R
+
+# identifying previous vs current gene match
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COMPILING_RELATION_PREVIOUS_CURRENT_TWAS_GENE_LIST.R
+
+# plotting predictive performance of gene expression models
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/PLOTTING_EXPRESSION_MODEL_PERFORMANCE_R2.R
+
+# determining how many GWAS loci are in proximity with TWAS genes
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/COUNT_LEAD_VARIANTS_TWAS_OVERLAP.R
+
+# trying to ascribe a gene to each novel GWAS locus
+Rscript /gpfs/data/huo-lab/BCAC/james.li/XANCESTRY_GWAS_TWAS/code/rscripts/IDENTIFY_SUGGESTIVE_GENES_NOVEL_LEAD_VARIANTS.R
+```
+
